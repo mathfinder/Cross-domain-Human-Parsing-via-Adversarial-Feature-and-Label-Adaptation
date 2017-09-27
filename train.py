@@ -2,7 +2,7 @@ import shutil
 import torch
 import time
 import torch.nn as nn
-from models.deeplab_g1_g2 import deeplabG1G2
+from models.flgan import FLGAN
 from torch.autograd import Variable
 from torch.utils import data
 from loader.image_label_loader import imageLabelLoader
@@ -15,6 +15,7 @@ import torchvision.models as models
 import matplotlib.pyplot as plt
 from util.log import Logger
 import numpy as np
+import Image
 def save_checkpoint(state, filename):
     torch.save(state, filename)
 
@@ -26,34 +27,6 @@ def update_confusion_matrix(matrix, output, target):
     output = output.cpu().numpy()
     matrix.update(target, output)
     return matrix
-
-
-def train(A_train_loader, B_train_loader, model, epoch):
-    # switch to train mode
-    model.train()
-    for i, (A_image, A_label) in enumerate(A_train_loader):
-        B_image = next(iter(B_train_loader))
-        model.set_input({'A':A_image, 'A_label':A_label, 'B':B_image})
-        model.optimize_parameters()
-        output = model.output
-        if i % args['print_freq'] == 0:
-            matrix = ConfusionMatrix()
-            update_confusion_matrix(matrix, output.data, A_label)
-
-            logger.info('Epoch/Iter: [{epoch}/{Iter}]\t'
-                  'loss: {loss:.4f}\t'
-                  'acc: {accuracy:.4f}\t'
-                  'fg_acc: {fg_accuracy:.4f}\t'
-                  'avg_prec: {avg_precision:.4f}\t'
-                  'avg_rec: {avg_recall:.4f}\t'
-                  'avg_f1: {avg_f1core:.4f}\t'
-                  'loss_G: {loss_G:.4f}\t'
-                  'loss_D: {loss_D:.4f}\t'.format(
-                epoch=epoch, Iter=i+epoch*len(A_train_loader), loss=model.loss_P.data[0], accuracy=matrix.accuracy(),
-                fg_accuracy=matrix.fg_accuracy(), avg_precision=matrix.avg_precision(),
-                avg_recall=matrix.avg_recall(), avg_f1core=matrix.avg_f1score(),
-                loss_G=model.loss_G.data[0], loss_D=model.loss_D.data[0]))
-
 
 def validate(val_loader, model, criterion, adaptation):
     # switch to evaluate mode
@@ -106,7 +79,7 @@ def main():
     B_val_loader = data.DataLoader(imageLabelLoader(args['data_path'], dataName=args['domainB'], phase='val'),
                                    batch_size=args['batch_size'],
                                    num_workers=args['num_workers'], shuffle=False)
-    model = deeplabG1G2()
+    model = FLGAN()
     model.initialize(args)
 
     # multi GPUS
@@ -138,7 +111,7 @@ def main():
             else:
                 model.set_input({'A': A_image, 'A_label': A_label, 'B': B_image})
 
-            model.optimize_parameters()
+            model.step()
             output = model.output
             if (i+1) % args['print_freq'] == 0:
                 matrix = ConfusionMatrix()
@@ -174,11 +147,8 @@ def main():
                 best_Ori_on_B = max(prec_Ori_on_B, best_Ori_on_B)
                 if is_best:
                     model.save('best_Ori_on_B', Iter=Iter, epoch=epoch, acc={'acc_Ori_on_A':acc_Ori_on_A, 'acc_Ori_on_B':acc_Ori_on_B})
-                elif prec_Ori_on_B > 0.51:
-                    model.save('Iter_{}'.format(Iter), Iter=Iter, epoch=epoch,
-                               acc={'acc_Ori_on_A': acc_Ori_on_A, 'acc_Ori_on_B': acc_Ori_on_B})
                 model.train()
-        if (args['if_adaptive'] and (epoch+1) % 30 == 0) or prec_Ori_on_B > 0.58:
+        if (args['if_adaptive'] and (epoch+1) % 30 == 0):
             model.update_learning_rate()
 
 
@@ -205,6 +175,7 @@ if __name__ == '__main__':
         'domainB': 'July',
         'weigths_pool': 'pretrain_models',
         'pretrain_model': 'deeplab.pth',
+        'log':'log',
         'fineSizeH':241,
         'fineSizeW':121,
         'input_nc':3,
@@ -217,8 +188,26 @@ if __name__ == '__main__':
         'if_adv_train':True,
         'if_adaptive':True,
     }
+    if not os.path.exists(args['checkpoints_dir']):
+        os.makedirs(args['checkpoints_dir'])
+    if not os.path.exists(args['log']):
+        os.makedirs(args['log'])
+    if not os.path.exists(os.path.join(args['data_path'], args['domainA'], 'label', 'train_onehot')):
+        print('Creat onehot label from domainA...')
+        onehot_label_path = os.path.join(args['data_path'], args['domainA'], 'label', 'train_onehot')
+        os.makedirs(onehot_label_path)
+        label_path = os.path.join(args['data_path'], args['domainA'], 'label', 'train')
+        for name in os.listdir(label_path):
+            lbl = Image.open(os.path.join(label_path, name))
+            lbl = np.array(lbl)
+            lbl_onehot = np.zeros((12, 241, 121))
+            for i in range(args['label_nums']):
+                lbl_onehot[i][lbl == i] = 1
+            np.save(os.path.join(onehot_label_path, name.split('.png')[0] + ".npy"), lbl_onehot)
+        print('Done!')
+
     logger = Logger(
-        log_file='./log/' + args['name'] + '-' + time.strftime("%Y-%m-%d_%H:%M:%S", time.localtime()) + '.log')
+        log_file=args['log'] + '/' + args['name'] + '-' + time.strftime("%Y-%m-%d_%H:%M:%S", time.localtime()) + '.log')
     logger.info('------------ Options -------------\n')
     for k, v in args.items():
         logger.info('%s: %s' % (str(k), str(v)))

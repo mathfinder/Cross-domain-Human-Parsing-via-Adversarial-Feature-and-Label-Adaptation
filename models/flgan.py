@@ -22,53 +22,15 @@ def weights_init(m):
         m.weight.data.normal_(0.0, 0.02)
 
 def define_D(which_netD, input_nc):
-    if which_netD == 'FFC':
-        return networks.FFC()
-    elif which_netD == 'NoBNMultPathdilationNet':
-        return networks.NoBNMultPathdilationNet()
-    elif which_netD == 'SinglePathdilationSingleOutputNet':
-        return networks.SinglePathdilationSingleOutputNet()
-    elif which_netD == 'SinglePathdilationMultOutputNet':
-        return networks.SinglePathdilationMultOutputNet()
-    elif which_netD == 'NoBNSinglePathdilationMultOutputNet':
+    if which_netD == 'NoBNSinglePathdilationMultOutputNet':
         return networks.NoBNSinglePathdilationMultOutputNet(input_nc)
-    elif which_netD == 'RandomMultPathdilationNet':
-        return networks.RandomMultPathdilationNet()
-    elif which_netD == 'lsgan_D':
-        return networks.lsgan_D()
     elif which_netD == 'lsganMultOutput_D':
         return networks.lsganMultOutput_D(input_nc)
 
-def poly_lr_scheduler(optimizer, init_lr, iter, lr_decay_iter=1, max_iter=30000, power=0.9,):
-    """Polynomial decay of learning rate
-        :param init_lr is base learning rate
-        :param iter is a current iteration
-        :param lr_decay_iter how frequently decay occurs, default is 1
-        :param max_iter is number of maximum iterations
-        :param power is a polymomial power
 
-    """
-    if iter % lr_decay_iter or iter > max_iter:
-        return optimizer
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = init_lr*(1 - iter/max_iter)**power
-
-
-def adjust_learning_rate(optimizer, init_lr, epoch):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = init_lr * (0.1 ** (epoch // 30))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-def constant_learning_rate(optimizer, init_lr):
-    """constant"""
-    for param_group in optimizer.param_groups:
-        print param_group['lr']
-        #param_group['lr'] = init_lr
-
-class deeplabG1G2(BaseModel):
+class FLGAN(BaseModel):
     def name(self):
-        return 'deeplabG1G2'
+        return 'flgan'
 
     def initialize(self, args):
         BaseModel.initialize(self, args)
@@ -79,10 +41,10 @@ class deeplabG1G2(BaseModel):
         self.nb = args['batch_size']
         sizeH, sizeW = args['fineSizeH'], args['fineSizeW']
 
-        self.input_A = self.Tensor(self.nb, args['input_nc'], sizeH, sizeW)
-        self.input_B = self.Tensor(self.nb, args['input_nc'], sizeH, sizeW)
-        self.input_A_label = torch.cuda.LongTensor(self.nb, 1, sizeH, sizeW)
-        self.input_label_onehot =  self.Tensor(self.nb, args['label_nums'], sizeH, sizeW)
+        self.tImageA = self.Tensor(self.nb, args['input_nc'], sizeH, sizeW)
+        self.tImageB = self.Tensor(self.nb, args['input_nc'], sizeH, sizeW)
+        self.tLabelA = torch.cuda.LongTensor(self.nb, 1, sizeH, sizeW)
+        self.tOnehotLabelA =  self.Tensor(self.nb, args['label_nums'], sizeH, sizeW)
         self.loss_G = Variable()
         self.loss_D = Variable()
 
@@ -161,51 +123,48 @@ class deeplabG1G2(BaseModel):
 
     def set_input(self, input):
         self.input = input
-        input_A = input['A']
-        input_A_label = input['A_label']
-        input_B = input['B']
-        self.input_A.resize_(input_A.size()).copy_(input_A)
-        self.input_A_label.resize_(input_A_label.size()).copy_(input_A_label)
-        self.input_B.resize_(input_B.size()).copy_(input_B)
+        tImageA = input['A']
+        tLabelA = input['A_label']
+        tImageB = input['B']
+        self.tImageA.resize_(tImageA.size()).copy_(tImageA)
+        self.vImageA = Variable(self.tImageA)
+
+        self.tLabelA.resize_(tLabelA.size()).copy_(tLabelA)
+        self.vLabelA = Variable(self.tLabelA)
+
+        self.tImageB.resize_(tImageB.size()).copy_(tImageB)
+        self.vImageB = Variable(self.tImageB)
 
         if input.has_key('label_onehot'):
-            input_label_onehot = input['label_onehot']
-            self.input_label_onehot.resize_(input_label_onehot.size()).copy_(input_label_onehot)
-
-    def forward(self):
-        self.A = Variable(self.input_A)
-        self.A_label = Variable(self.input_A_label)
-        self.label_onehot = Variable(self.input_label_onehot)
-        self.B = Variable(self.input_B)
+            tOnehotLabelA = input['label_onehot']
+            self.tOnehotLabelA.resize_(tOnehotLabelA.size()).copy_(tOnehotLabelA)
+            self.vOnehotLabelA = Variable(self.tOnehotLabelA)
 
     # used in test time, no backprop
     def test(self, input):
-        self.input_A.resize_(input.size()).copy_(input)
-        self.A = Variable(self.input_A)
-        self.output = self.deeplabPart3(self.deeplabPart2(self.deeplabPart1(self.A)))
+        self.tImageA.resize_(input.size()).copy_(input)
+        self.vImageA = Variable(self.tImageA)
+        self.output = self.deeplabPart3(self.deeplabPart2(self.deeplabPart1(self.vImageA)))
         return self.output
 
-    def get_image_paths(self):
-        pass
-
-    def backward_P(self):
+    def step_P(self):
         # Maintain pool5_B in this status
-        self.pool5_B = self.deeplabPart2(self.deeplabPart1(self.B))
+        self.pool5_B = self.deeplabPart2(self.deeplabPart1(self.vImageB))
         self.pool5_B_for_d1 = Variable(self.pool5_B.data)
 
-        self.pool1_A = self.deeplabPart1(self.A)
+        self.pool1_A = self.deeplabPart1(self.vImageA)
         self.pool5_A = self.deeplabPart2(self.pool1_A)
         self.predic_A = self.deeplabPart3(self.pool5_A)
         self.output = Variable(self.predic_A.data)
 
-        self.loss_P = self.criterionCE(self.predic_A, self.A_label) / self.nb
+        self.loss_P = self.criterionCE(self.predic_A, self.vLabelA) / self.nb
         self.loss_P.backward()
 
         self.pool1_A = Variable(self.pool1_A.data)
         self.pool5_A = Variable(self.pool5_A.data)
 
 
-    def backward_G1(self):
+    def step_G1(self):
         self.pool5_A = self.pool5_A + self.netG1(self.pool1_A)
         pred_fake = self.netD1.forward(self.pool5_A)
 
@@ -214,7 +173,7 @@ class deeplabG1G2(BaseModel):
 
         self.pool5_A = Variable(self.pool5_A.data)
 
-    def backward_D1(self):
+    def step_D1(self):
         pred_real = self.netD1.forward(self.pool5_B_for_d1)
         loss_D1_real = self.criterionAdv(pred_real, True)
 
@@ -224,16 +183,16 @@ class deeplabG1G2(BaseModel):
         self.loss_D1 = (loss_D1_real + loss_D1_fake) * 0.5
         self.loss_D1.backward()
 
-    def backward_G2(self):
+    def step_G2(self):
         self.predic_B = self.deeplabPart3(self.pool5_B)
         pred_fake = self.netD2.forward(self.predic_B)
 
         self.loss_G2 = self.criterionAdv(pred_fake, True)
         self.loss_G2.backward()
 
-    def backward_D2(self):
-        #self.label_onehot = Variable(self.label_onehot.data)
-        pred_real = self.netD2.forward(self.label_onehot)
+    def step_D2(self):
+        #self.vOnehotLabelA = Variable(self.vOnehotLabelA.data)
+        pred_real = self.netD2.forward(self.vOnehotLabelA)
         loss_D2_real = self.criterionAdv(pred_real, True)
 
         self.predic_B = Variable(self.predic_B.data)
@@ -244,44 +203,42 @@ class deeplabG1G2(BaseModel):
 
         self.loss_D2.backward()
 
-    def backward_R(self):
-        pool1 = self.deeplabPart1(self.A)
+    def step_R(self):
+        pool1 = self.deeplabPart1(self.vImageA)
         self.predic_A_R = self.deeplabPart3(self.deeplabPart2(pool1) + self.netG1(pool1))
-        self.loss_R = self.criterionCE(self.predic_A_R, self.A_label) / self.nb
+        self.loss_R = self.criterionCE(self.predic_A_R, self.vLabelA) / self.nb
 
         self.loss_R.backward()
 
-    def optimize_parameters(self):
+    def step(self):
         self.Iter += 1
-        # forward
-        self.forward()
         # deeplab
         self.optimizer_P.zero_grad()
-        self.backward_P()
+        self.step_P()
         self.optimizer_P.step()
 
         # G1
         self.optimizer_G1.zero_grad()
-        self.backward_G1()
+        self.step_G1()
         self.optimizer_G1.step()
         # D1
         self.optimizer_D1.zero_grad()
-        self.backward_D1()
+        self.step_D1()
         self.optimizer_D1.step()
         if self.Iter % self.interval_g2 == 0 and self.if_adv_train:
             # G2
             self.optimizer_G2.zero_grad()
-            self.backward_G2()
+            self.step_G2()
             self.optimizer_G2.step()
         if self.Iter % self.interval_d2 == 0 and self.if_adv_train:
             # D2
             self.optimizer_D2.zero_grad()
-            self.backward_D2()
+            self.step_D2()
             self.optimizer_D2.step()
 
         # Refine
         self.optimizer_R.zero_grad()
-        self.backward_R()
+        self.step_R()
         self.optimizer_R.step()
 
 
@@ -372,6 +329,6 @@ class deeplabG1G2(BaseModel):
         self.deeplabPart1.eval()
         self.deeplabPart2.eval()
         self.deeplabPart3.eval()
-        self.netG1.train()
-        self.netD1.train()
-        self.netD2.train()
+        self.netG1.eval()
+        self.netD1.eval()
+        self.netD2.eval()
